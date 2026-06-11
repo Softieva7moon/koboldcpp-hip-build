@@ -1,0 +1,95 @@
+name: Build KoboldCpp + ROCm for AMD (gfx1031)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout KoboldCpp
+        uses: actions/checkout@v4
+        with:
+          repository: LostRuins/koboldcpp
+          ref: master
+          submodules: recursive
+
+      - name: Download ROCm nightly (gfx103X)
+        shell: pwsh
+        run: |
+          $s3Response = (Invoke-WebRequest "https://therock-nightly-tarball.s3.amazonaws.com/?prefix=therock-dist-windows-gfx103X-dgpu-7").Content
+          $files = $s3Response -split '<Key>' | Where-Object {$_ -match '</Key>'} | ForEach-Object { ($_ -split '</Key>')[0] }
+          $versionFiles = @()
+          foreach ($file in $files) {
+            if ($file -match "therock-dist-windows-gfx103X-dgpu-.*?(\d+\.\d+\.\d+(?:a|rc)\d+)\.tar\.gz") {
+              $v = $matches[1]
+              $versionFiles += [PSCustomObject]@{ File = $file; Version = $v }
+            }
+          }
+          $latest = ($versionFiles | Sort-Object Version | Select-Object -Last 1).File
+          $url = "https://therock-nightly-tarball.s3.amazonaws.com/$latest"
+          Write-Host "Downloading: $url"
+          Invoke-WebRequest -Uri $url -OutFile "rocm.tar.gz"
+
+      - name: Extract ROCm
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "C:\opt\rocm"
+          tar -xzf rocm.tar.gz -C C:\opt\rocm --strip-components=1
+
+      - name: Build KoboldCpp with HIP
+        shell: cmd
+        run: |
+          set HIP_PATH=C:\opt\rocm
+          set ROCM_PATH=C:\opt\rocm
+          set HIP_PLATFORM=amd
+          set PATH=C:\opt\rocm\lib\llvm\bin;C:\opt\rocm\bin;%PATH%
+          call "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath > vs_path.txt
+          set /p VS_PATH=<vs_path.txt
+          call "%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
+          mkdir build
+          cd build
+          cmake .. -G Ninja ^
+            -DCMAKE_C_COMPILER="C:\opt\rocm\lib\llvm\bin\clang.exe" ^
+            -DCMAKE_CXX_COMPILER="C:\opt\rocm\lib\llvm\bin\clang++.exe" ^
+            -DCMAKE_CXX_FLAGS="-IC:\opt\rocm\include" ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DGPU_TARGETS="gfx1030;gfx1031;gfx1032;gfx1034" ^
+            -DBUILD_SHARED_LIBS=ON ^
+            -DLLAMA_BUILD_TESTS=OFF ^
+            -DGGML_HIP=ON ^
+            -DGGML_OPENMP=OFF ^
+            -DGGML_RPC=ON ^
+            -DGGML_HIP_ROCWMMA_FATTN=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_STATIC=OFF ^
+            -DCMAKE_SYSTEM_NAME=Windows
+          cmake --build . -j %NUMBER_OF_PROCESSORS%
+
+      - name: Bundle ROCm DLLs + KoboldCpp
+        shell: pwsh
+        run: |
+          $out = "build\bin"
+          $rocm = "C:\opt\rocm\bin"
+          # Copy HIP runtime DLLs
+          foreach ($pattern in @("amdhip64_*.dll","rocm_kpack.dll","amd_comgr*.dll","libhipblas.dll","hipblas.dll","rocblas.dll","rocsolver.dll","libhipblaslt.dll")) {
+            Get-ChildItem $rocm -Name $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item (Join-Path $rocm $_) (Join-Path $out $_) -Force
+            }
+          }
+          # Copy GPU kernel libraries (gfx1031 support)
+          if (Test-Path "$rocm\rocblas\library") {
+            Copy-Item "$rocm\rocblas\library" "$out\rocblas\library" -Recurse -Force
+          }
+          if (Test-Path "$rocm\hipblaslt\library") {
+            Copy-Item "$rocm\hipblaslt\library" "$out\hipblaslt\library" -Recurse -Force
+          }
+          # Copy launcher script
+          Copy-Item "koboldcpp.py" "$out\koboldcpp.py" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: koboldcpp-hip-gfx1031
+          path: build/bin/
+          retention-days: 30
