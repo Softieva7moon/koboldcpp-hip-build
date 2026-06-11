@@ -7,12 +7,11 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout KoboldCpp
-        uses: actions/checkout@v4
-        with:
-          repository: LostRuins/koboldcpp
-          ref: master
-          submodules: recursive
+      - name: Clone KoboldCpp repo
+        shell: pwsh
+        run: |
+          git clone --depth 1 --single-branch --branch master https://github.com/LostRuins/koboldcpp.git .
+          git submodule update --init --depth 1
 
       - name: Download ROCm nightly (gfx103X)
         shell: pwsh
@@ -88,6 +87,12 @@ jobs:
           Copy-Item "koboldcpp.py" "$out\koboldcpp.py" -Force
 
       - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: koboldcpp-hip-gfx1031
+          path: build/bin/
+          retention-days: 30
+
         uses: actions/upload-artifact@v4
         with:
           name: koboldcpp-hip-gfx1031
